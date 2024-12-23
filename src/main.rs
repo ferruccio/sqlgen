@@ -1,7 +1,12 @@
 use clap::Parser;
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
+use std::path::PathBuf;
 
-type Result<T> = anyhow::Result<T>;
+mod module;
+
+use module::*;
+
+pub type Result<T> = anyhow::Result<T>;
 
 #[derive(Debug, Parser)]
 struct Opts {
@@ -10,6 +15,9 @@ struct Opts {
 
     #[clap(index = 2)]
     schema: String,
+
+    #[clap(index = 3)]
+    module: PathBuf,
 }
 
 #[tokio::main]
@@ -17,13 +25,13 @@ async fn main() -> Result<()> {
     let opts = Opts::parse();
     let pool = PgPoolOptions::new().connect(&opts.database_url).await?;
     let tables = tablenames(&pool, &opts.schema).await?;
-    for table in tables {
-        println!("{table}");
+    let _existed = create_module_path(&opts.module)?;
+    for table in tables.iter() {
         let columns = table_columns(&pool, &table).await?;
-        for col in columns {
-            println!("  {}: {}", col.col_name, col.type_def);
-        }
+        create_table_src(&opts.module, table, &columns)?;
     }
+    create_module(&opts.module, &tables)?;
+    create_module_types(&opts.module)?;
     Ok(())
 }
 
@@ -31,7 +39,7 @@ async fn tablenames(
     pool: &Pool<Postgres>,
     schema: impl AsRef<str>,
 ) -> Result<Vec<String>> {
-    let tables: Vec<(String,)> = sqlx::query_as(
+    let mut tables: Vec<(String,)> = sqlx::query_as(
         r#"
         SELECT table_name
             FROM information_schema.tables
@@ -41,6 +49,7 @@ async fn tablenames(
     .bind(schema.as_ref())
     .fetch_all(pool)
     .await?;
+    tables.sort();
     Ok(tables.into_iter().map(|t| t.0).collect())
 }
 
@@ -50,6 +59,7 @@ struct ColumnInfo {
     ordinal_position: i32,
     is_nullable: String,
     udt_name: String,
+    #[allow(unused)]
     character_maximum_length: Option<i32>,
 }
 
@@ -71,10 +81,7 @@ async fn table_columns(
         "#,
     ).bind(tablename.as_ref()).fetch_all(pool).await?;
     fields.sort_by(|a, b| a.ordinal_position.cmp(&b.ordinal_position));
-    Ok(fields
-        .iter()
-        .map(|field| column_definition(field))
-        .collect())
+    Ok(fields.iter().map(column_definition).collect())
 }
 
 fn column_definition(column: &ColumnInfo) -> ColumnDef {
@@ -86,10 +93,7 @@ fn column_definition(column: &ColumnInfo) -> ColumnDef {
     let mut type_def: String = match udt_name {
         "int4" => "DbInt4".into(),
         "int8" => "DbInt8".into(),
-        "bpchar" => format!(
-            "&[DbChar; {}]",
-            column.character_maximum_length.unwrap_or_default(),
-        ),
+        "bpchar" => "DbChar".into(),
         "varchar" => "DbVarChar".into(),
         "text" => "DbText".into(),
         "timestamp" => "DbTimeStamp".into(),
